@@ -2,7 +2,7 @@ import { useEffect, useMemo, useState, type FormEvent } from 'react'
 import { BrowserRouter, Link, Navigate, Route, Routes } from 'react-router-dom'
 import './App.css'
 
-const API_BASE = 'http://localhost:8000/api'
+const API_BASE = `http://${window.location.hostname}:8000/api`
 
 type User = {
   id: number
@@ -21,10 +21,13 @@ type Summary = {
 }
 
 async function api<T>(path: string, options: RequestInit = {}): Promise<T> {
+  const csrfToken = document.cookie.split('; ').find((cookie) => cookie.startsWith('csrftoken='))?.slice('csrftoken='.length)
+  const method = (options.method || 'GET').toUpperCase()
   const response = await fetch(`${API_BASE}${path}`, {
     credentials: 'include',
     ...options,
     headers: {
+      ...(csrfToken && !['GET', 'HEAD', 'OPTIONS', 'TRACE'].includes(method) ? { 'X-CSRFToken': decodeURIComponent(csrfToken) } : {}),
       ...(options.headers || {}),
       ...(options.body && !(options.body instanceof FormData) ? { 'Content-Type': 'application/json' } : {}),
     },
