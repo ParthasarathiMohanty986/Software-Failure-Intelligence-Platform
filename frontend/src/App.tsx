@@ -132,7 +132,7 @@ function ProtectedApp({ user, onLogout }: { user: User; onLogout: () => void }) 
 function AuthScreen({ onLogin }: { onLogin: (user: User) => void }) {
   const [mode, setMode] = useState<'login' | 'register'>('login')
   const [error, setError] = useState('')
-  const [form, setForm] = useState({ username: 'demo', email: 'demo@example.com', password: 'demo1234' })
+  const [form, setForm] = useState({ username: '', email: '', password: '' })
 
   const handleSubmit = async (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault()
