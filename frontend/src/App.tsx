@@ -2,7 +2,7 @@ import { useEffect, useMemo, useState, type FormEvent } from 'react'
 import { BrowserRouter, Link, Navigate, Route, Routes } from 'react-router-dom'
 import './App.css'
 
-const API_BASE = `http://${window.location.hostname}:8000/api`
+const API_BASE = '/api'
 
 type User = {
   id: number
@@ -34,8 +34,14 @@ async function api<T>(path: string, options: RequestInit = {}): Promise<T> {
   })
 
   if (!response.ok) {
-    const data = await response.json().catch(() => ({}))
-    throw new Error((data as { detail?: string; error?: string }).detail || (data as { detail?: string; error?: string }).error || 'Request failed')
+    const data: unknown = await response.json().catch(() => null)
+    const messages = data && typeof data === 'object'
+      ? Object.entries(data).map(([field, value]) => {
+          const message = Array.isArray(value) ? value.join(' ') : typeof value === 'string' ? value : ''
+          return message ? (['detail', 'error', 'non_field_errors'].includes(field) ? message : `${field}: ${message}`) : ''
+        }).filter(Boolean)
+      : []
+    throw new Error(messages.join(' ') || `Request failed (HTTP ${response.status}). Please refresh and try again.`)
   }
 
   if (response.status === 204) {
@@ -126,7 +132,7 @@ function ProtectedApp({ user, onLogout }: { user: User; onLogout: () => void }) 
 function AuthScreen({ onLogin }: { onLogin: (user: User) => void }) {
   const [mode, setMode] = useState<'login' | 'register'>('login')
   const [error, setError] = useState('')
-  const [form, setForm] = useState({ username: 'demo', email: 'demo@example.com', password: 'demo1234' })
+  const [form, setForm] = useState({ username: '', email: '', password: '' })
 
   const handleSubmit = async (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault()
@@ -276,13 +282,17 @@ function LogsView() {
     if (!file) return
     const formData = new FormData()
     formData.append('file', file)
-    const result = await api<{ summary: { accepted: number; rejected: number; duplicate: number } }>('/logs/upload/', {
-      method: 'POST',
-      body: formData,
-    })
-    setMessage(`Uploaded ${result.summary.accepted} accepted records.`)
-    setFile(null)
-    loadLogs()
+    try {
+      const result = await api<{ summary: { accepted: number; rejected: number; duplicate: number } }>('/logs/upload/', {
+        method: 'POST',
+        body: formData,
+      })
+      setMessage(`Upload complete: ${result.summary.accepted} accepted, ${result.summary.rejected} rejected, ${result.summary.duplicate} duplicates.`)
+      setFile(null)
+      await loadLogs()
+    } catch (error) {
+      setMessage(error instanceof Error ? error.message : 'Log upload failed. Please try again.')
+    }
   }
 
   return (
@@ -317,78 +327,93 @@ function LogsView() {
   )
 }
 
-function IncidentsView() {
-  const [incidents, setIncidents] = useState<Array<{ id: number; title: string; severity: string; status: string; service_name: string; error_count: number; error_signature: string }>>([])
+type InvestigationReport = {
+  id: number; status: string; summary: string; error_message?: string;
+  result: Record<string, unknown>; evidence: Record<string, unknown>;
+}
 
+function Report({ report }: { report: InvestigationReport }) {
+  const render = (value: unknown): string => typeof value === 'string' ? value : JSON.stringify(value, null, 2)
+  return <section className="panel">
+    <h2>Investigation #{report.id} — {report.status}</h2>
+    <p>{report.summary}</p>
+    {report.error_message && <p role="alert">{report.error_message}</p>}
+    {Object.entries(report.result).map(([key, value]) => <div key={key}>
+      <h3>{key.replaceAll('_', ' ')}</h3>
+      <pre style={{ whiteSpace: 'pre-wrap', overflowWrap: 'anywhere', fontFamily: 'inherit' }}>{render(value)}</pre>
+    </div>)}
+    <details><summary>Supporting logs, frequency, and runbook sources</summary>
+      <pre style={{ whiteSpace: 'pre-wrap', overflowWrap: 'anywhere' }}>{JSON.stringify(report.evidence, null, 2)}</pre>
+    </details>
+  </section>
+}
+
+function IncidentsView() {
+  const [incidents, setIncidents] = useState<Array<{ id: number; title: string; severity: string; status: string; service_name: string; error_count: number }>>([])
+  const [message, setMessage] = useState('')
+  const [busy, setBusy] = useState(false)
+  const [report, setReport] = useState<InvestigationReport | null>(null)
   const load = async () => {
-    const data = await api<{ results: Array<{ id: number; title: string; severity: string; status: string; service_name: string; error_count: number; error_signature: string }> }>('/incidents/')
+    const data = await api<{ results: typeof incidents }>('/incidents/')
     setIncidents(data.results)
   }
-
-  useEffect(() => { load().catch((error) => console.error(error)) }, [])
-
-  const updateStatus = async (incidentId: number, status: string) => {
-    await api(`/incidents/${incidentId}/update/`, { method: 'PATCH', body: JSON.stringify({ status }) })
-    load()
+  useEffect(() => { load().catch(error => setMessage(String(error))) }, [])
+  const detect = async () => {
+    setBusy(true)
+    setMessage('Detecting recurring errors…')
+    try {
+      await api('/incidents/detect/', { method: 'POST' })
+      await load()
+      setMessage('Detection complete. Select Investigate to collect evidence and request AI analysis.')
+    } catch (error) { setMessage(String(error)) } finally { setBusy(false) }
   }
-
-  return (
-    <div className="content-stack">
-      <div className="panel">
-        <div className="panel-header"><h2>Incident feed</h2></div>
-        <div className="table-wrap">
-          <table>
-            <thead>
-              <tr><th>Title</th><th>Service</th><th>Severity</th><th>Status</th><th>Errors</th><th>Action</th></tr>
-            </thead>
-            <tbody>
-              {incidents.map((incident) => (
-                <tr key={incident.id}>
-                  <td>{incident.title}</td>
-                  <td>{incident.service_name}</td>
-                  <td><span className={`badge ${incident.severity}`}>{incident.severity}</span></td>
-                  <td>{incident.status}</td>
-                  <td>{incident.error_count}</td>
-                  <td>
-                    <button onClick={() => updateStatus(incident.id, 'investigating')}>Investigate</button>
-                  </td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
-        </div>
-      </div>
-    </div>
-  )
+  const investigate = async (id: number) => {
+    setBusy(true)
+    setReport(null)
+    setMessage('Collecting evidence and requesting AI analysis…')
+    try {
+      const data = await api<{ investigation_id: number }>(`/incidents/${id}/investigate/`, { method: 'POST' })
+      setReport(await api<InvestigationReport>(`/investigations/${data.investigation_id}/`))
+      await load()
+      setMessage('Investigation finished. Review the result below.')
+    } catch (error) { setMessage(String(error)) } finally { setBusy(false) }
+  }
+  const resolve = async (id: number) => {
+    setBusy(true)
+    try {
+      await api(`/incidents/${id}/update/`, { method: 'PATCH', body: JSON.stringify({ status: 'resolved' }) })
+      await load()
+    } catch (error) { setMessage(String(error)) } finally { setBusy(false) }
+  }
+  return <div className="content-stack"><section className="panel">
+    <div className="panel-header"><h2>Incident feed</h2><button disabled={busy} onClick={detect}>Detect incidents</button></div>
+    <p role="status">{message}</p>
+    {!incidents.length && <p>No incidents yet. Detect incidents from your uploaded logs.</p>}
+    <div className="table-wrap"><table><thead><tr><th>Title</th><th>Service</th><th>Severity</th><th>Status</th><th>Errors</th><th>Actions</th></tr></thead>
+      <tbody>{incidents.map(item => <tr key={item.id}>
+        <td>{item.title}</td><td>{item.service_name}</td><td>{item.severity}</td><td>{item.status}</td><td>{item.error_count}</td>
+        <td><button disabled={busy} onClick={() => investigate(item.id)}>Investigate</button>{' '}
+        <button disabled={busy || item.status === 'resolved'} onClick={() => resolve(item.id)}>Mark resolved</button></td>
+      </tr>)}</tbody></table></div>
+    <p>Resolve only after independently verifying the cause and recovery.</p>
+  </section>{report && <Report report={report} />}</div>
 }
 
 function AiView() {
   const [investigations, setInvestigations] = useState<Array<{ id: number; summary: string; status: string; incident_id: number }>>([])
-
+  const [report, setReport] = useState<InvestigationReport | null>(null)
+  const [error, setError] = useState('')
   useEffect(() => {
-    const load = async () => {
-      const data = await api<{ results: Array<{ id: number; summary: string; status: string; incident_id: number }> }>('/investigations/')
-      setInvestigations(data.results)
-    }
-    load().catch((error) => console.error(error))
+    api<{ results: typeof investigations }>('/investigations/').then(data => setInvestigations(data.results)).catch(err => setError(String(err)))
   }, [])
-
-  return (
-    <div className="content-stack">
-      <div className="panel">
-        <div className="panel-header"><h2>AI investigation history</h2></div>
-        <div className="list-rows">
-          {investigations.map((item) => (
-            <div key={item.id} className="list-row">
-              <span>Incident #{item.incident_id}</span>
-              <strong>{item.status}</strong>
-              <small>{item.summary || 'Investigation available'}</small>
-            </div>
-          ))}
-        </div>
-      </div>
-    </div>
-  )
+  return <div className="content-stack"><section className="panel"><h2>Investigation history</h2>
+    {error && <p role="alert">{error}</p>}
+    {!investigations.length && <p>Run an investigation from the Incidents page to see a report here.</p>}
+    {investigations.map(item => <div key={item.id} className="list-row">
+      <span>Incident #{item.incident_id} — {item.status}</span><p>{item.summary}</p>
+      <button onClick={() => { api<InvestigationReport>(`/investigations/${item.id}/`).then(setReport).catch(err => setError(String(err))) }}>View report</button>
+    </div>)}
+  </section>{report && <Report report={report} />}</div>
 }
 
 function KnowledgeView() {

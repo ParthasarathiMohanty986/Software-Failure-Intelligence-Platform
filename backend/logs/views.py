@@ -6,6 +6,7 @@ from rest_framework.response import Response
 from rest_framework.views import APIView
 
 from .models import LogEntry, PipelineRun
+from incidents.services import auto_group_errors
 from .services import create_pipeline_run, get_rows_from_upload, ingest_records
 
 
@@ -26,7 +27,7 @@ class LogUploadView(APIView):
         pipeline.status = "running"
         pipeline.save(update_fields=["status"])
         try:
-            result = ingest_records(rows, request.user, source_name)
+            result = ingest_records(rows, request.user, source_name, pipeline=pipeline)
             pipeline.total_records = len(rows)
             pipeline.accepted_records = result["accepted"]
             pipeline.rejected_records = result["rejected"]
@@ -34,6 +35,7 @@ class LogUploadView(APIView):
             pipeline.error_details = result["errors"]
             pipeline.status = "completed"
             pipeline.save()
+            auto_group_errors(request.user)
             return Response({"pipeline_id": pipeline.id, "summary": result}, status=status.HTTP_200_OK)
         except Exception as exc:
             pipeline.status = "failed"
@@ -52,7 +54,7 @@ class LogIngestView(APIView):
         pipeline = create_pipeline_run(request.user, "manual_ingest", len(records))
         pipeline.status = "running"
         pipeline.save(update_fields=["status"])
-        result = ingest_records(records, request.user, "manual_ingest")
+        result = ingest_records(records, request.user, "manual_ingest", pipeline=pipeline)
         pipeline.total_records = len(records)
         pipeline.accepted_records = result["accepted"]
         pipeline.rejected_records = result["rejected"]
@@ -60,6 +62,7 @@ class LogIngestView(APIView):
         pipeline.error_details = result["errors"]
         pipeline.status = "completed"
         pipeline.save()
+        auto_group_errors(request.user)
         return Response({"pipeline_id": pipeline.id, "summary": result})
 
 

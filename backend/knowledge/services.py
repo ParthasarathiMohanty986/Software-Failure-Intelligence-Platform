@@ -3,18 +3,9 @@ import os
 from typing import Any
 
 from django.conf import settings
+from django.utils import timezone
 
 from .models import DocumentChunk, KnowledgeDocument
-
-
-def _fallback_embedding(text: str, size: int = 8) -> list[float]:
-    vector = []
-    for i in range(size):
-        total = 0.0
-        for idx, char in enumerate(text):
-            total += (ord(char) * (idx + 1)) / (i + 1.1)
-        vector.append(round(total % 1.0, 6))
-    return vector
 
 
 def cosine_similarity(a: list[float], b: list[float]) -> float:
@@ -38,7 +29,7 @@ def embed_text(text: str) -> list[float]:
             return embedding.embed_query(text)
         except Exception:
             pass
-    return _fallback_embedding(text)
+    return []
 
 
 def chunk_text(text: str, chunk_size: int = 800, overlap: int = 120) -> list[str]:
@@ -61,35 +52,27 @@ def index_document(document: KnowledgeDocument, content: str):
         vector = embed_text(chunk)
         DocumentChunk.objects.create(document=document, chunk_index=index, content=chunk, metadata={"source_name": document.title}, embedding=vector)
     document.status = "indexed"
-    document.indexed_at = document.indexed_at or None
+    document.indexed_at = timezone.now()
     document.save(update_fields=["status", "indexed_at"])
 
 
-def search_runbooks(query: str, limit: int = 5):
-    if not query:
-        return []
-    query_vector = embed_text(query)
-    results = []
-    for chunk in DocumentChunk.objects.select_related("document").all():
-        score = cosine_similarity(query_vector, chunk.embedding or _fallback_embedding(chunk.content))
-        if score > 0.05:
-            results.append({
-                "document": chunk.document.title,
-                "score": round(score, 4),
-                "content": chunk.content[:500],
-            })
-    return sorted(results, key=lambda item: item["score"], reverse=True)[:limit]
-
-
 def search_user_runbooks(user, query: str, limit: int = 5):
+    # Keyword retrieval provides an honest fallback for legacy placeholder vectors.
+    import re
+    tokens = set(re.findall(r"[a-z0-9]+", query.lower()))
     query_vector = embed_text(query)
     results = []
+    seen = set()
     for chunk in DocumentChunk.objects.select_related("document").filter(document__user=user):
-        score = cosine_similarity(query_vector, chunk.embedding or _fallback_embedding(chunk.content))
+        if chunk.content in seen:
+            continue
+        seen.add(chunk.content)
+        stored = chunk.embedding or []
+        semantic = len(query_vector) > 8 and len(query_vector) == len(stored)
+        words = set(re.findall(r"[a-z0-9]+", chunk.content.lower()))
+        score = cosine_similarity(query_vector, stored) if semantic else len(tokens & words) / max(len(tokens), 1)
         if score > 0.05:
-            results.append({
-                "document": chunk.document.title,
-                "score": round(score, 4),
-                "content": chunk.content[:500],
-            })
+            results.append({"document": chunk.document.title, "document_id": chunk.document_id,
+                            "chunk_id": chunk.id, "method": "semantic" if semantic else "keyword",
+                            "score": round(score, 4), "content": chunk.content})
     return sorted(results, key=lambda item: item["score"], reverse=True)[:limit]

@@ -1,4 +1,6 @@
 from django.contrib.auth import authenticate, get_user_model, login, logout
+from django.utils.decorators import method_decorator
+from django.views.decorators.csrf import csrf_protect, ensure_csrf_cookie
 from rest_framework import permissions, serializers, status
 from rest_framework.response import Response
 from rest_framework.views import APIView
@@ -8,6 +10,7 @@ from .serializers import LoginSerializer, RegisterSerializer
 User = get_user_model()
 
 
+@method_decorator(csrf_protect, name="dispatch")
 class RegisterView(APIView):
     permission_classes = [permissions.AllowAny]
 
@@ -19,6 +22,7 @@ class RegisterView(APIView):
         return Response({"id": user.id, "username": user.username, "email": user.email}, status=status.HTTP_201_CREATED)
 
 
+@method_decorator(csrf_protect, name="dispatch")
 class LoginView(APIView):
     permission_classes = [permissions.AllowAny]
 
@@ -38,6 +42,7 @@ class LogoutView(APIView):
         return Response({"detail": "Logged out"}, status=status.HTTP_200_OK)
 
 
+@method_decorator(ensure_csrf_cookie, name="dispatch")
 class MeView(APIView):
     def get(self, request):
         user = request.user

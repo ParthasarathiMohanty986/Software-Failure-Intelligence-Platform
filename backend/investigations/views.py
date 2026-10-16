@@ -35,6 +35,7 @@ class InvestigationDetailView(APIView):
             "evidence": item.evidence,
             "tool_history": item.tool_history,
             "provider": item.provider,
+            "error_message": item.error_message,
             "created_at": item.created_at.isoformat(),
         })
 

@@ -50,7 +50,7 @@ def normalize_message(value: Any) -> str:
 def compute_fingerprint(record: dict[str, Any], user_id: int) -> str:
     payload = {
         "user_id": user_id,
-        "timestamp": record.get("timestamp"),
+        "timestamp": parse_timestamp(record.get("timestamp")).isoformat(),
         "service": normalize_service_name(record.get("service_name")),
         "level": normalize_level(record.get("level")),
         "message": normalize_message(record.get("message")),
@@ -125,11 +125,12 @@ def get_rows_from_upload(file_obj) -> list[dict[str, Any]]:
     raise ValueError("Unsupported file type")
 
 
-def ingest_records(records: list[dict[str, Any]], user, source_name: str = "upload") -> dict[str, Any]:
+def ingest_records(records: list[dict[str, Any]], user, source_name: str = "upload", pipeline=None) -> dict[str, Any]:
     accepted = rejected = duplicate = skipped = 0
     errors: list[str] = []
     detailed_errors: list[dict[str, Any]] = []
     valid_rows: list[LogEntry] = []
+    seen_fingerprints = set()
 
     if not records:
         return {"accepted": 0, "rejected": 0, "duplicate": 0, "skipped": 0, "errors": [], "pipeline": None}
@@ -147,7 +148,7 @@ def ingest_records(records: list[dict[str, Any]], user, source_name: str = "uplo
             continue
 
         fingerprint = compute_fingerprint(normalized, user.id)
-        if LogEntry.objects.filter(user=user, fingerprint=fingerprint).exists():
+        if fingerprint in seen_fingerprints or LogEntry.objects.filter(user=user, fingerprint=fingerprint).exists():
             duplicate += 1
             continue
 
@@ -166,12 +167,13 @@ def ingest_records(records: list[dict[str, Any]], user, source_name: str = "uplo
             raw_payload=row,
         )
         valid_rows.append(entry)
+        seen_fingerprints.add(fingerprint)
         accepted += 1
 
     with transaction.atomic():
         LogEntry.objects.bulk_create(valid_rows, batch_size=500)
 
-    pipeline = PipelineRun.objects.create(
+    pipeline = pipeline or PipelineRun.objects.create(
         user=user,
         source_name=source_name,
         status="completed",
@@ -191,7 +193,7 @@ def ingest_records(records: list[dict[str, Any]], user, source_name: str = "uplo
         "duplicate": duplicate,
         "skipped": skipped,
         "errors": detailed_errors,
-        "pipeline": pipeline,
+        "pipeline": pipeline.id,
     }
 
 
