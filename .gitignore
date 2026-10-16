@@ -19,3 +19,7 @@ backend/.env
 # OS
 .DS_Store
 Thumbs.db
+
+# Generated interview artifacts and scratch files
+output/
+tmp/

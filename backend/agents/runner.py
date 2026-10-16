@@ -1,71 +1,71 @@
-from __future__ import annotations
-
-from typing import Any
+from datetime import timedelta
+from time import monotonic
 
 from django.conf import settings
+from django.utils import timezone
 
-from incidents.models import Incident
+from ai.services import generate_incident_analysis
 from investigations.models import Investigation, InvestigationEvent
-
-from .tools import (
-    get_error_frequency,
-    get_pipeline_health,
-    get_recent_errors,
-    get_related_logs,
-    get_service_error_summary,
-    search_runbooks,
-)
+from knowledge.services import search_user_runbooks
+from logs.models import LogEntry
 
 
 class IncidentAgent:
-    def __init__(self, incident: Incident, user, max_steps: int | None = None):
+    def __init__(self, incident, user, max_steps=None):
         self.incident = incident
         self.user = user
-        self.max_steps = max_steps or getattr(settings, "APP_CONFIG", {}).get("agent_max_steps", 4)
 
     def run(self):
+        if self.incident.user_id != self.user.id:
+            raise PermissionError("Incident does not belong to this user")
+        started = monotonic()
         investigation = Investigation.objects.create(
-            incident=self.incident,
-            user=self.user,
-            status="running",
-            provider="langchain",
+            incident=self.incident, user=self.user, status="running",
+            provider=settings.APP_CONFIG["ai_model"],
         )
-        InvestigationEvent.objects.create(investigation=investigation, event_type="start", details={"service": self.incident.service_name})
-
+        self.incident.status = "investigating"
+        self.incident.save(update_fields=["status"])
         evidence = {}
-        tool_history = []
-        for step in range(self.max_steps):
-            if step == 0:
-                tool_history.append({"step": step + 1, "tool": "get_recent_errors", "args": {"service_name": self.incident.service_name, "time_window": "24h"}})
-                evidence["recent_errors"] = get_recent_errors.invoke({"service_name": self.incident.service_name, "time_window": "24h"})
-            if step == 1:
-                tool_history.append({"step": step + 1, "tool": "get_error_frequency", "args": {"error_signature": self.incident.error_signature, "time_window": "7d"}})
-                evidence["frequency"] = get_error_frequency.invoke({"error_signature": self.incident.error_signature, "time_window": "7d"})
-            if step == 2:
-                tool_history.append({"step": step + 1, "tool": "get_related_logs", "args": {"incident_id": self.incident.id, "limit": 20}})
-                evidence["related_logs"] = get_related_logs.invoke({"incident_id": self.incident.id, "limit": 20})
-            if step == 3:
-                tool_history.append({"step": step + 1, "tool": "search_runbooks", "args": {"query": self.incident.service_name + " " + self.incident.error_signature}})
-                evidence["runbooks"] = search_runbooks.invoke({"query": self.incident.service_name + " " + self.incident.error_signature})
-            if step == 4:
-                tool_history.append({"step": step + 1, "tool": "get_pipeline_health", "args": {}})
-                evidence["pipeline_health"] = get_pipeline_health.invoke({})
-                break
+        history = []
 
-            InvestigationEvent.objects.create(investigation=investigation, event_type="tool_call", details={"step": step + 1, "tool": tool_history[-1]})
+        def record(name, value):
+            evidence[name] = value
+            history.append({"step": len(history) + 1, "tool": name})
+            InvestigationEvent.objects.create(investigation=investigation, event_type="tool_call", details=history[-1])
 
-        summary = {
-            "incident_id": self.incident.id,
-            "service": self.incident.service_name,
-            "status": "completed",
-            "tool_history": tool_history,
-            "evidence": evidence,
-        }
-        investigation.status = "completed"
-        investigation.summary = "Reviewed recent failures and supporting telemetry for the incident."
-        investigation.result = summary
+        def serialize(qs):
+            return [{"id": log.id, "service": log.service_name, "level": log.level,
+                     "message": log.message, "timestamp": log.timestamp.isoformat(),
+                     "exception_type": log.exception_type} for log in qs]
+
+        InvestigationEvent.objects.create(investigation=investigation, event_type="start", details={})
+        try:
+            owned = LogEntry.objects.filter(user=self.user)
+            related = owned.filter(incident_links__incident=self.incident)
+            record("related_logs", serialize(related.order_by("-timestamp")[:20]))
+            record("recent_errors", serialize(owned.filter(
+                service_name=self.incident.service_name, level__in=["ERROR", "CRITICAL"],
+                timestamp__gte=timezone.now() - timedelta(hours=24)).order_by("-timestamp")[:10]))
+            record("frequency", {"count": related.filter(timestamp__gte=timezone.now() - timedelta(days=7)).count(),
+                                 "time_window": "7d", "total_linked_logs": related.count()})
+            record("runbooks", search_user_runbooks(self.user, self.incident.service_name + " " + self.incident.error_signature))
+            analysis = generate_incident_analysis(
+                {"id": self.incident.id, "service": self.incident.service_name,
+                 "signature": self.incident.error_signature, "severity": self.incident.severity,
+                 "error_count": self.incident.error_count},
+                evidence["related_logs"], evidence["frequency"], evidence["runbooks"],
+            )
+            investigation.result = analysis.model_dump()
+            investigation.summary = analysis.executive_summary
+            investigation.status = "completed"
+        except Exception as exc:
+            # Do not persist provider exception text, which can include credentials or request data.
+            investigation.status = "failed"
+            investigation.error_message = "AI investigation unavailable (" + type(exc).__name__ + "). Check the configured provider API key, AI_MODEL, provider quota and connectivity, then retry."
+            investigation.summary = "Investigation incomplete. Collected evidence is available below; no AI diagnosis was produced."
         investigation.evidence = evidence
-        investigation.tool_history = tool_history
+        investigation.tool_history = history
+        investigation.execution_time_ms = int((monotonic() - started) * 1000)
         investigation.save()
-        InvestigationEvent.objects.create(investigation=investigation, event_type="complete", details={"summary": summary})
+        InvestigationEvent.objects.create(investigation=investigation, event_type=investigation.status, details={"error": investigation.error_message})
         return investigation

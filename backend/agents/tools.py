@@ -5,7 +5,7 @@ from django.db.models import Count, Q
 from langchain_core.tools import tool
 
 from incidents.models import Incident
-from knowledge.services import search_runbooks
+from knowledge.services import search_user_runbooks
 from logs.models import LogEntry, PipelineRun
 
 
@@ -57,11 +57,11 @@ def get_service_error_summary(service_name: str, time_window: str = "7d") -> str
 
 
 @tool
-def search_runbooks(query: str) -> str:
+def search_runbooks(query: str, user_id: int) -> str:
     """Find relevant troubleshooting documentation."""
     if not query:
         return "[]"
-    return str(search_runbooks(query, limit=5))
+    return str(search_user_runbooks(user_id, query, limit=5))
 
 
 @tool
