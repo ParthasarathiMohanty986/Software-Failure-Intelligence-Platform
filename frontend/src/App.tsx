@@ -34,8 +34,14 @@ async function api<T>(path: string, options: RequestInit = {}): Promise<T> {
   })
 
   if (!response.ok) {
-    const data = await response.json().catch(() => ({}))
-    throw new Error((data as { detail?: string; error?: string }).detail || (data as { detail?: string; error?: string }).error || 'Request failed')
+    const data: unknown = await response.json().catch(() => null)
+    const messages = data && typeof data === 'object'
+      ? Object.entries(data).map(([field, value]) => {
+          const message = Array.isArray(value) ? value.join(' ') : typeof value === 'string' ? value : ''
+          return message ? (['detail', 'error', 'non_field_errors'].includes(field) ? message : `${field}: ${message}`) : ''
+        }).filter(Boolean)
+      : []
+    throw new Error(messages.join(' ') || `Request failed (HTTP ${response.status}). Please refresh and try again.`)
   }
 
   if (response.status === 204) {
